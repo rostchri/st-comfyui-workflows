@@ -19,6 +19,7 @@
 // across ST versions).
 import { eventSource, event_types, saveSettingsDebounced, characters, this_chid, getThumbnailUrl, getRequestHeaders } from '../../../../script.js';
 import { extension_settings, renderExtensionTemplateAsync } from '../../../extensions.js';
+import { saveBase64AsFile } from '../../../utils.js';
 
 console.log('[st-comfyui-workflows] module loaded');
 
@@ -534,10 +535,21 @@ async function generateClicked() {
         const t1 = performance.now();
         if (data.images && data.images.length) {
             const meta = _workflowsMeta[workflow] || {};
-            const mime = meta.output_format === 'webp' ? 'image/webp' : 'image/png';
+            const ext = meta.output_format === 'webp' ? 'webp' : 'png';
+            // Server-side save → URL statt fat data: URI. Analog zum NanoGPT-
+            // Pattern in SillyTavern's stable-diffusion extension. Subfolder
+            // ist fix "comfyui-workflows" — die Settings-UI generiert nicht
+            // im Character-Kontext.
+            let imgSrc;
+            try {
+                imgSrc = await saveBase64AsFile(data.images[0], 'comfyui-workflows', `${workflow}_${Date.now()}`, ext);
+            } catch (saveErr) {
+                console.warn(`[${MODULE_NAME}] saveBase64AsFile failed, falling back to data-URI:`, saveErr);
+                imgSrc = `data:image/${ext};base64,${data.images[0]}`;
+            }
             const img = new Image();
             img.className = 'comfyui-wf-thumb';
-            img.src = `data:${mime};base64,${data.images[0]}`;
+            img.src = imgSrc;
             resultEl.appendChild(img);
             statusEl.className = 'comfyui-wf-status success';
             statusEl.textContent = `OK — ${Math.round((t1 - t0) / 1000)}s client / ${data.stats?.total_time ?? '?'}ms server`;
