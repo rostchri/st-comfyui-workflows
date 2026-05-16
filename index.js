@@ -58,13 +58,15 @@ function saveSettings() {
 
 // ---------------------------------------------------------------------------
 // API-Calls — gehen ueber den SillyTavern-Backend-Proxy (st-ext-server-loader).
-// Der Browser fetcht nur same-origin, kein CORS / keine Cookie-Magie noetig.
+// Der Browser fetcht same-origin gegen /api/plugins/...; ST-CSRF-Middleware
+// schuetzt /api/* Routen, deshalb IMMER getRequestHeaders() nutzen — die
+// Funktion setzt X-CSRF-Token + Content-Type automatisch korrekt.
 // ---------------------------------------------------------------------------
 
 async function fetchJSON(path, options = {}) {
     const url = `${BACKEND_BASE}${path}`;
-    // same-origin, ST-Session-Cookie wird automatisch mitgeschickt
-    const r = await fetch(url, options);
+    const headers = { ...getRequestHeaders(), ...(options.headers || {}) };
+    const r = await fetch(url, { ...options, headers });
     if (!r.ok) {
         const text = await r.text().catch(() => '');
         throw new Error(`HTTP ${r.status} ${url} — ${text.slice(0, 200)}`);
@@ -84,7 +86,6 @@ async function loadOpenAPI() {
 async function generate(workflow, input) {
     return fetchJSON(`/workflow/${encodeURIComponent(workflow)}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ input }),
     });
 }
