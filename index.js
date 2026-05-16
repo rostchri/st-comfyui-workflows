@@ -9,9 +9,10 @@
 // Zero patches to SillyTavern core files — registers its own settings-drawer
 // section and slash-command `/sd-cw`.
 //
-// Browser ↔ ComfyUI: direct fetch(). Default Base-URL is configurable in
-// settings. fetch() uses `credentials: 'include'` so cookie-based SSO
-// (Authelia, oauth2-proxy, etc.) cross-subdomain works.
+// v0.3.0+: all HTTP traffic to ComfyUI is routed through the SillyTavern
+// backend via the st-ext-server-loader plugin. The browser only ever
+// fetches same-origin URLs (/api/plugins/st-ext-server-loader/ext/...),
+// no CORS / cookie-credentials gymnastics needed.
 
 // ES Module imports — ST extensions are loaded as ES Modules. We import the
 // real symbols instead of destructuring from `SillyTavern.*` (which varies
@@ -25,9 +26,13 @@ const MODULE_NAME = 'st-comfyui-workflows';
 const EXTENSION_FOLDER = `third-party/${MODULE_NAME}`;
 const SETTINGS_KEY = 'comfyui_workflows';
 
-// Default Base-URL — placeholder. Configure your own backend in the
-// extension settings (Settings → Extensions → "ComfyUI Workflows").
-const DEFAULT_BASE = 'https://comfyui.example.com/api-proxy';
+// All HTTP traffic to ComfyUI goes through the SillyTavern backend now.
+// The browser extension calls the loader-mounted plugin routes, the plugin
+// proxies to the real comfyui-api on its internal (Tailscale / private)
+// network. The Base-URL is therefore fixed — there's nothing to configure
+// in the browser anymore. To change the upstream, set COMFYUI_BASE_URL in
+// the SillyTavern container's env.
+const BACKEND_BASE = '/api/plugins/st-ext-server-loader/ext/st-comfyui-workflows';
 
 // ---------------------------------------------------------------------------
 // Settings-Persistenz (in extensionSettings unter SETTINGS_KEY)
@@ -36,12 +41,14 @@ const DEFAULT_BASE = 'https://comfyui.example.com/api-proxy';
 function getSettings() {
     if (!extension_settings[SETTINGS_KEY] || typeof extension_settings[SETTINGS_KEY] !== 'object') {
         extension_settings[SETTINGS_KEY] = {
-            base_url: DEFAULT_BASE,
             workflow: '',
             // Pro Workflow eigener Param-State: {workflow_name: {param: value}}
             params: {},
         };
     }
+    // base_url im stored state kann aus aelteren Versionen liegen — wird
+    // nicht mehr verwendet (Backend-URL kommt aus dem ST-Container env).
+    // Wir loeschen den Schluessel nicht aktiv um Migration sanft zu halten.
     return extension_settings[SETTINGS_KEY];
 }
 
@@ -50,20 +57,14 @@ function saveSettings() {
 }
 
 // ---------------------------------------------------------------------------
-// API-Calls
+// API-Calls — gehen ueber den SillyTavern-Backend-Proxy (st-ext-server-loader).
+// Der Browser fetcht nur same-origin, kein CORS / keine Cookie-Magie noetig.
 // ---------------------------------------------------------------------------
 
-function apiBase() {
-    return (getSettings().base_url || DEFAULT_BASE).replace(/\/$/, '');
-}
-
 async function fetchJSON(path, options = {}) {
-    const url = `${apiBase()}${path}`;
-    // credentials: 'include' so SSO cookies set on the parent domain go
-    // through cross-subdomain — required when the backend sits behind
-    // cookie-based auth (Authelia, oauth2-proxy etc.). Harmless when no
-    // auth is in front.
-    const r = await fetch(url, { credentials: 'include', ...options });
+    const url = `${BACKEND_BASE}${path}`;
+    // same-origin, ST-Session-Cookie wird automatisch mitgeschickt
+    const r = await fetch(url, options);
     if (!r.ok) {
         const text = await r.text().catch(() => '');
         throw new Error(`HTTP ${r.status} ${url} — ${text.slice(0, 200)}`);
@@ -81,7 +82,7 @@ async function loadOpenAPI() {
 }
 
 async function generate(workflow, input) {
-    return fetchJSON(`/workflow/${workflow}`, {
+    return fetchJSON(`/workflow/${encodeURIComponent(workflow)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ input }),
@@ -252,8 +253,8 @@ async function getCurrentCharacterAvatarAsDataUrl() {
     const url = typeof getThumbnailUrl === 'function'
         ? getThumbnailUrl('avatar', char.avatar)
         : `/characters/${encodeURIComponent(char.avatar)}`;
-    // Fetch + convert
-    const r = await fetch(url, { credentials: 'include' });
+    // Same-origin fetch — der Avatar liegt im ST-Backend selbst
+    const r = await fetch(url);
     if (!r.ok) throw new Error(`avatar HTTP ${r.status}`);
     const blob = await r.blob();
     // Blob → JPEG-DataURI via Canvas (gleicher Pfad wie fileToJpegDataUrl)
@@ -592,8 +593,6 @@ function registerSlashCommand() {
 
 async function init() {
     try {
-        const settings = getSettings();
-
         // Settings-HTML laden + ins #extensions_settings2-Panel haengen
         const settingsHtml = $(await renderExtensionTemplateAsync(EXTENSION_FOLDER, 'settings'));
         const container = document.getElementById('extensions_settings2');
@@ -603,15 +602,7 @@ async function init() {
         }
         container.appendChild(settingsHtml[0]);
 
-        // URL-Input verdrahten
-        const baseInput = document.getElementById('comfyui_wf_base');
-        baseInput.value = settings.base_url || DEFAULT_BASE;
-        baseInput.addEventListener('change', () => {
-            settings.base_url = baseInput.value.trim() || DEFAULT_BASE;
-            saveSettings();
-        });
-
-        // Test-Button
+        // Test-Button — pingt Backend an + laedt Workflows
         document.getElementById('comfyui_wf_test').addEventListener('click', () => {
             loadAndPopulate(document.getElementById('comfyui_wf_test_status'));
         });
@@ -625,13 +616,11 @@ async function init() {
         // Slash-Command registrieren
         registerSlashCommand();
 
-        console.log(`[${MODULE_NAME}] initialized (base=${settings.base_url})`);
+        console.log(`[${MODULE_NAME}] initialized (backend=${BACKEND_BASE})`);
 
-        // Best-effort: workflows direkt laden wenn URL gesetzt (keep silent)
-        if (settings.base_url) {
-            loadAndPopulate(document.getElementById('comfyui_wf_test_status'))
-                .catch(e => console.warn(`[${MODULE_NAME}] initial load failed:`, e));
-        }
+        // Best-effort: workflows direkt laden (keep silent)
+        loadAndPopulate(document.getElementById('comfyui_wf_test_status'))
+            .catch(e => console.warn(`[${MODULE_NAME}] initial load failed:`, e));
     } catch (e) {
         console.error(`[${MODULE_NAME}] init failed:`, e);
     }
