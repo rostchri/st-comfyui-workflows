@@ -9,18 +9,14 @@
             <small>
                 Talks to a self-hosted ComfyUI backend running
                 <a href="https://github.com/SaladTechnologies/comfyui-api" target="_blank">SaladTechnologies/comfyui-api</a>.
-                Workflows and their parameter schemas are discovered dynamically via
-                <code>/api-proxy/workflows-meta</code> and <code>/api-proxy/docs/json</code>.
-                Each request fires from the browser directly to the Base-URL with
-                <code>credentials: 'include'</code> (works with cookie-based SSO).
+                Workflows + parameter schemas are discovered dynamically.
+                Requests go through the SillyTavern backend
+                (via <a href="https://github.com/rostchri/st-ext-server-loader" target="_blank">st-ext-server-loader</a>)
+                — the upstream URL is configured server-side via the
+                <code>COMFYUI_BASE_URL</code> env var on the SillyTavern container.
             </small>
 
             <h4>Verbindung</h4>
-            <div class="comfyui-wf-row">
-                <label for="comfyui_wf_base">Base-URL</label>
-                <input id="comfyui_wf_base" type="text" class="text_pole"
-                    placeholder="https://comfyui.example.com/api-proxy">
-            </div>
             <div class="comfyui-wf-row">
                 <label>&nbsp;</label>
                 <button id="comfyui_wf_test" class="menu_button" style="flex:0">Test + Workflows laden</button>
