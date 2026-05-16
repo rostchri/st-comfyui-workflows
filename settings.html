@@ -1,0 +1,49 @@
+<div id="comfyui_wf_settings" class="comfyui-wf-section">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b>ComfyUI Workflows</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+
+            <small>
+                Talks to a self-hosted ComfyUI backend running
+                <a href="https://github.com/SaladTechnologies/comfyui-api" target="_blank">SaladTechnologies/comfyui-api</a>.
+                Workflows and their parameter schemas are discovered dynamically via
+                <code>/api-proxy/workflows-meta</code> and <code>/api-proxy/docs/json</code>.
+                Each request fires from the browser directly to the Base-URL with
+                <code>credentials: 'include'</code> (works with cookie-based SSO).
+            </small>
+
+            <h4>Verbindung</h4>
+            <div class="comfyui-wf-row">
+                <label for="comfyui_wf_base">Base-URL</label>
+                <input id="comfyui_wf_base" type="text" class="text_pole"
+                    placeholder="https://comfyui.example.com/api-proxy">
+            </div>
+            <div class="comfyui-wf-row">
+                <label>&nbsp;</label>
+                <button id="comfyui_wf_test" class="menu_button" style="flex:0">Test + Workflows laden</button>
+            </div>
+            <div id="comfyui_wf_test_status" class="comfyui-wf-status"></div>
+
+            <h4>Workflow</h4>
+            <div class="comfyui-wf-row">
+                <label for="comfyui_wf_workflow">Workflow</label>
+                <select id="comfyui_wf_workflow" class="text_pole"></select>
+            </div>
+            <div id="comfyui_wf_wf_card" class="comfyui-wf-wf-card" style="display:none"></div>
+
+            <h4>Parameter</h4>
+            <form id="comfyui_wf_form"></form>
+
+            <h4>Generieren</h4>
+            <div class="comfyui-wf-row">
+                <label>&nbsp;</label>
+                <button id="comfyui_wf_generate" class="menu_button" style="flex:0">🎨 Generate</button>
+            </div>
+            <div id="comfyui_wf_gen_status" class="comfyui-wf-status"></div>
+            <div id="comfyui_wf_result"></div>
+        </div>
+    </div>
+</div>

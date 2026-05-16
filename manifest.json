@@ -1,0 +1,12 @@
+{
+  "display_name": "ComfyUI Workflows",
+  "loading_order": 100,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "rostchri",
+  "version": "0.2.0",
+  "homePage": "https://github.com/rostchri/st-comfyui-workflows",
+  "auto_update": false
+}
