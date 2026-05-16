@@ -1,0 +1,172 @@
+/* st-comfyui-workflows — Settings + Generate-UI Styles
+ *
+ * Color-Vereinbarung: harte light-Farben mit !important damit egal welches
+ * Theme uns nicht in ein dunkel-auf-dunkel-Loch faerbt. ST's
+ * SmartTheme*-Variablen sind je nach Theme unterschiedlich — wir koennen
+ * uns nicht drauf verlassen dass sie lesbar bleiben.
+ */
+
+.comfyui-wf-section {
+    padding: 0.5rem 0.7rem;
+}
+
+.comfyui-wf-section,
+.comfyui-wf-section * {
+    color: #ddd !important;
+}
+
+.comfyui-wf-section h4 {
+    margin: 0.4rem 0 0.3rem 0;
+    border-bottom: 1px solid #555;
+    padding-bottom: 0.2rem;
+    color: #fff !important;
+    font-weight: 600;
+}
+
+.comfyui-wf-row {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+    margin: 0.35rem 0;
+}
+
+.comfyui-wf-row label {
+    flex: 0 0 9rem;
+    font-size: 0.85rem;
+    color: #ddd !important;
+}
+
+/* Placeholder-Text muss eigene Regel haben — `color` greift nicht aufs
+   ::placeholder-Pseudo-Element. Sonst dunkel-auf-dunkel im Black-Theme. */
+.comfyui-wf-section input::placeholder,
+.comfyui-wf-section textarea::placeholder {
+    color: #888 !important;
+    opacity: 1 !important;
+}
+
+/* Bump auch input/select/textarea value text fuer den Fall dass ST's
+   text_pole-Klasse doch dunkel rendert. */
+.comfyui-wf-section input,
+.comfyui-wf-section select,
+.comfyui-wf-section textarea {
+    color: #fff !important;
+}
+
+.comfyui-wf-row input,
+.comfyui-wf-row select,
+.comfyui-wf-row textarea {
+    flex: 1;
+}
+
+.comfyui-wf-wf-card {
+    background: var(--SmartThemeBlurTintColor);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 4px;
+    padding: 0.5rem 0.7rem;
+    margin: 0.4rem 0;
+    font-size: 0.85rem;
+}
+
+.comfyui-wf-wf-card .title {
+    font-weight: 600;
+}
+
+.comfyui-wf-wf-card .meta {
+    opacity: 0.7;
+    font-size: 0.78rem;
+    margin-top: 0.2rem;
+}
+
+.comfyui-wf-wf-card .tag {
+    display: inline-block;
+    padding: 0.05rem 0.4rem;
+    border-radius: 9px;
+    background: #345;
+    color: #cdf !important;
+    font-size: 0.72rem;
+    margin-right: 0.3rem;
+}
+
+.comfyui-wf-status {
+    font-size: 0.8rem;
+    opacity: 0.85;
+    margin: 0.3rem 0;
+    min-height: 1.1rem;
+    color: #ccc !important;
+}
+
+.comfyui-wf-status.error {
+    color: #f88 !important;
+}
+
+.comfyui-wf-status.success {
+    color: #8f8 !important;
+}
+
+.comfyui-wf-thumb {
+    max-width: 100%;
+    border-radius: 4px;
+    margin-top: 0.4rem;
+    border: 1px solid #555;
+}
+
+/* I2I-Image-Input-Block — file-picker als Button stylen, damit OS-Default
+   nicht im dark-Theme verschwindet. Native input[type=file] wird mit display:none
+   versteckt und ueber das umgebende label getriggert. */
+.comfyui-wf-image-wrap {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    min-width: 0;       /* damit flex-children korrekt schrumpfen */
+}
+
+.comfyui-wf-image-buttons {
+    display: flex;
+    gap: 0.4rem;
+    align-items: stretch;
+}
+
+.comfyui-wf-file-pick-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.4rem 0.7rem;
+    background: #345 !important;
+    color: #fff !important;
+    border: 1px solid #567;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    user-select: none;
+    white-space: nowrap;
+    flex: 1 1 auto;
+    min-width: 8rem;
+}
+
+.comfyui-wf-file-pick-label:hover {
+    background: #456 !important;
+}
+
+.comfyui-wf-file-pick-label input[type="file"] {
+    display: none;
+}
+
+.comfyui-wf-file-pick-label .filename {
+    opacity: 0.75;
+    font-size: 0.78rem;
+    margin-left: auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 10rem;
+}
+
+.comfyui-wf-avatar-btn,
+.comfyui-wf-clear-btn {
+    flex: 0 0 auto !important;
+    padding: 0.4rem 0.6rem !important;
+    white-space: nowrap !important;
+    line-height: 1.2 !important;
+    min-height: 0 !important;
+    height: auto !important;
+}
