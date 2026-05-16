@@ -8,61 +8,98 @@ It discovers workflows + their parameter schemas dynamically and renders
 a tailored form per workflow. No baked-in workflow assumptions — works
 with whatever the backend exposes.
 
+## Architecture (v0.3.0+)
+
+Browser-extension ↔ ComfyUI now goes through the **SillyTavern backend**
+instead of fetching directly from the browser. This eliminates CORS
+complexity, allows the ComfyUI backend to live on a private network
+(Tailscale, VPN, Docker-internal), and produces a single central log in
+the SillyTavern container.
+
+```
+SillyTavern Browser-UI                 SillyTavern Backend (Node.js)             ComfyUI-API
+       │                                       │                                       │
+       │ POST /api/plugins/st-ext-server-loader/ext/                                  │
+       │      st-comfyui-workflows/workflow/<name>                                    │
+       │ ──────────────────────────────────────► │                                    │
+       │                                       │ POST $COMFYUI_BASE_URL/workflow/...  │
+       │                                       │ ──────────────────────────────────►  │
+       │                                       │ ◄────────── {images: [base64]} ──── │
+       │ ◄──────────── {images: [base64]} ──── │                                      │
+```
+
+## Required: st-ext-server-loader
+
+This extension ships server-side code in a `server/` subdirectory. To
+load it, the SillyTavern instance must have the
+[**st-ext-server-loader**](https://github.com/rostchri/st-ext-server-loader)
+server-plugin installed and `enableServerPlugins: true` in its config.
+
+**One-time setup per SillyTavern instance:**
+
+1. Put `st-ext-server-loader` into SillyTavern's `plugins/` directory:
+   ```
+   /home/node/app/plugins/st-ext-server-loader/
+   ├── package.json
+   └── index.js
+   ```
+2. Enable plugins: set `SILLYTAVERN_ENABLESERVERPLUGINS=true` (env-var)
+   or `enableServerPlugins: true` in `config.yaml`.
+3. Set the upstream URL: `COMFYUI_BASE_URL=http://your-comfyui-host:3000`
+4. Restart the SillyTavern container.
+
+You only do this **once per ST instance**. After that, any extension
+which ships a `server/` folder (like this one) is auto-loaded — no
+further container changes for additional extensions.
+
 ## Features
 
 - **Settings drawer section** with:
-  - Base-URL input (default placeholder; set to your own backend)
-  - "Test + load workflows" button
-  - Workflow dropdown (auto-populated from `/api-proxy/workflows-meta`)
-  - Workflow card with display name, description, tags, category, estimated render time, output format
+  - Test button (pings the backend + populates the workflow list)
+  - Workflow dropdown (auto-populated from `/workflows-meta`)
+  - Workflow card with display name, description, tags, category,
+    estimated render time, output format
   - **Dynamic parameter form** generated from the OpenAPI schema
     (text, number, enum, boolean, nested objects for things like group toggles)
-  - **I2I file picker** with auto-JPEG conversion (PNG data-URIs are known to
-    be corrupted by `comfyui-api` v1.17.1)
-  - **"Use char avatar"** button — uses the currently selected SillyTavern
-    character's avatar as the I2I input
+  - **I2I file picker** with auto-JPEG conversion (PNG data-URIs are
+    known to be corrupted by `comfyui-api` v1.17.1)
+  - **"Use char avatar"** button — uses the currently selected
+    SillyTavern character's avatar as the I2I input
   - Generate button + result thumbnail
-- **Slash-command** `/sd-cw workflow=<name> prompt="..."` for programmatic invocation
-  (slot it into Quick Replies, Lorebooks, etc.)
-- **Per-workflow parameter persistence** in `extensionSettings.comfyui_workflows.params`
-- SSO-friendly (browser fetch uses `credentials: 'include'`)
+- **Slash-command** `/sd-cw workflow=<name> prompt="..."` for
+  programmatic invocation (slot it into Quick Replies, Lorebooks, etc.)
+- **Per-workflow parameter persistence** in
+  `extensionSettings.comfyui_workflows.params`
 
 ## Installation
 
 ### Via SillyTavern Extension Manager (recommended)
 
-1. Open SillyTavern → Extensions toolbar icon (stacked cards)
-2. **"Manage extensions"** → **"Install extension"**
-3. URL:
+1. Make sure [**st-ext-server-loader**](https://github.com/rostchri/st-ext-server-loader)
+   is installed in the ST container (see *Required* section above).
+2. Open SillyTavern → Extensions toolbar icon (stacked cards)
+3. **"Manage extensions"** → **"Install extension"**
+4. URL:
    ```
    https://github.com/rostchri/st-comfyui-workflows
    ```
-4. Install → reload the browser tab
-5. Extension shows up as **"ComfyUI Workflows"** in the settings drawer
+5. Install → **restart the SillyTavern container** (server-side `init()`
+   only runs at container startup)
+6. Reload the browser tab → extension shows up as **"ComfyUI Workflows"**
 
 ### Manual
 
 ```sh
 cd <SillyTavern-root>/public/scripts/extensions/third-party
 git clone https://github.com/rostchri/st-comfyui-workflows.git
+# Restart the ST container
 ```
-
-## Setup
-
-1. In the extension settings, set **Base-URL** to your ComfyUI backend
-   (e.g. `https://comfyui.example.com/api-proxy` if you use a TLS reverse proxy,
-   or `http://your-host:8188/api-proxy` for direct LAN access)
-2. Click **"Test + load workflows"** — populates the dropdown
-3. Pick a workflow, fill in parameters, hit **Generate**
-
-If the backend sits behind cookie-based SSO (Authelia, oauth2-proxy, etc.):
-- Visit the backend host once in a browser tab so the SSO cookie is set
-- Since the extension uses `credentials: 'include'`, cookies on the parent
-  domain (`example.com`) are sent on cross-subdomain XHRs
 
 ## Backend requirements
 
-The backend must expose these endpoints (all under `<base_url>`):
+The upstream `comfyui-api` instance (pointed to by `COMFYUI_BASE_URL` on
+the SillyTavern container) must expose these endpoints (all under the
+configured base URL):
 
 | Endpoint | Purpose |
 |---|---|
@@ -106,17 +143,6 @@ sits in `custom_nodes/comfyui-api-proxy/` of the companion infra repo —
 - Output is always `images[0]` as base64 — MIME is taken from
   `output_format` in the workflow's meta (defaults to PNG)
 
-## CORS / Auth notes
-
-If the browser and backend are on different origins:
-- Start ComfyUI with `--enable-cors-header https://<your-st-host>`
-- The proxy `api-proxy` custom-node adds `Access-Control-Allow-Credentials: true`
-  and reflects the specific Origin when it matches a configured suffix
-- For preflight (OPTIONS) to work without auth challenge, route OPTIONS
-  around your auth proxy. With Traefik this is a one-line rule:
-  `Host(\`comfyui.example.com\`) && Method(\`OPTIONS\`)` with no auth
-  middleware in the chain.
-
 ## Slash-command
 
 ```
@@ -139,6 +165,7 @@ cd st-comfyui-workflows
 ```
 
 In ST: "Manage extensions" → click the update arrow next to your install.
+**Then restart the ST container** if you changed anything under `server/`.
 
 ## License
 
