@@ -6,7 +6,7 @@
   "js": "index.js",
   "css": "style.css",
   "author": "rostchri",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "homePage": "https://github.com/rostchri/st-comfyui-workflows",
   "auto_update": false
 }
