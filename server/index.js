@@ -13,9 +13,9 @@
  * Browser counterpart calls these via:
  *   fetch('/api/plugins/st-ext-server-loader/ext/st-comfyui-workflows/...', ...)
  *
- * Backend-URL is configured via env var COMFYUI_BASE_URL. Default points to
- * the example placeholder — production deployments set it to the internal
- * (VPN / Tailscale / Docker-network) URL of their comfyui-api instance.
+ * Backend URLs are configured via env vars (see below). Defaults point to
+ * the example placeholder — production deployments set them to the internal
+ * (VPN / Tailscale / Docker-network) URLs.
  *
  * Why this exists:
  *   - Centralised logging in the SillyTavern container (visible via
@@ -28,18 +28,32 @@
  */
 
 const LOG_PREFIX = '[st-comfyui-workflows]';
-const DEFAULT_BACKEND = 'http://comfyui.example.local:3000';
+// Two upstream URLs because the comfyui-api FastAPI wrapper and the ComfyUI
+// custom-node `api-proxy` live on different ports:
+//
+//   COMFYUI_API_URL  → comfyui-api wrapper (SaladTechnologies). Serves
+//                       /workflow/<name>, /docs/json, /health.
+//   COMFYUI_NODE_URL → ComfyUI itself, with the comfyui-api-proxy custom-node
+//                       mounted at /api-proxy/. Serves /workflows-meta.
+//
+// In a Traefik-fronted setup these often look like one URL with a path-prefix
+// router doing the split. For internal Tailscale we keep them explicit.
+const DEFAULT_API_URL = 'http://comfyui.example.local:3000';
+const DEFAULT_NODE_URL = 'http://comfyui.example.local:8188/api-proxy';
 
-function backendUrl() {
-    return (process.env.COMFYUI_BASE_URL || DEFAULT_BACKEND).replace(/\/$/, '');
+function apiUrl() {
+    return (process.env.COMFYUI_API_URL || process.env.COMFYUI_BASE_URL || DEFAULT_API_URL).replace(/\/$/, '');
+}
+function nodeUrl() {
+    return (process.env.COMFYUI_NODE_URL || DEFAULT_NODE_URL).replace(/\/$/, '');
 }
 
 /**
  * Generic JSON proxy. Forwards method + body, returns the parsed JSON
- * (or the upstream error verbatim).
+ * (or the upstream error verbatim). `base` is one of apiUrl()/nodeUrl().
  */
-async function proxyJson(req, res, path) {
-    const url = `${backendUrl()}${path}`;
+async function proxyJson(req, res, base, path) {
+    const url = `${base}${path}`;
     const init = {
         method: req.method,
         headers: { 'Content-Type': 'application/json' },
@@ -69,25 +83,30 @@ async function proxyJson(req, res, path) {
 }
 
 async function init(router) {
-    console.log(`${LOG_PREFIX} server-side proxy ready (backend=${backendUrl()})`);
+    console.log(`${LOG_PREFIX} server-side proxy ready (api=${apiUrl()} node=${nodeUrl()})`);
 
     // Liveness / config-visibility endpoint
     router.get('/health', (_req, res) => {
-        res.json({ ok: true, backend: backendUrl() });
+        res.json({ ok: true, api: apiUrl(), node: nodeUrl() });
     });
 
-    // Workflow discovery
-    router.get('/workflows-meta', (req, res) => proxyJson(req, res, '/workflows-meta'));
-    router.get('/docs/json', (req, res) => proxyJson(req, res, '/docs/json'));
+    // Workflow-Discovery → ComfyUI custom-node (lebt am ComfyUI-Port, nicht
+    // am comfyui-api Port). Pfad ist `/workflows-meta` unter nodeUrl().
+    router.get('/workflows-meta', (req, res) => proxyJson(req, res, nodeUrl(), '/workflows-meta'));
 
-    // Render — analog zum NanoGPT-Pattern in SillyTavern's stable-diffusion
-    // extension. Wir loggen den eingehenden input ausfuehrlich damit der
-    // generierte Prompt + alle Parameter im container-log nachvollziehbar sind.
+    // OpenAPI-Schema → comfyui-api wrapper.
+    router.get('/docs/json', (req, res) => proxyJson(req, res, apiUrl(), '/docs/json'));
+
+    // Render → comfyui-api wrapper.
+    //
+    // Logging analog zum NanoGPT-Pattern in SillyTavern's stable-diffusion
+    // extension: input ausfuehrlich damit Prompt + alle Parameter im
+    // container-log nachvollziehbar sind.
     router.post('/workflow/:name', (req, res) => {
         const name = req.params.name;
         // eslint-disable-next-line no-console
         console.debug(`${LOG_PREFIX} render request workflow=${name} input=`, req.body?.input);
-        return proxyJson(req, res, `/workflow/${encodeURIComponent(name)}`);
+        return proxyJson(req, res, apiUrl(), `/workflow/${encodeURIComponent(name)}`);
     });
 }
 
