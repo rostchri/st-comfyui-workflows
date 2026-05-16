@@ -1,0 +1,8 @@
+{
+    "name": "st-comfyui-workflows-server",
+    "version": "0.1.0",
+    "description": "Server-side proxy for st-comfyui-workflows browser extension. Forwards requests to a self-hosted ComfyUI backend (SaladTechnologies/comfyui-api) over an internal network.",
+    "main": "index.js",
+    "private": true,
+    "license": "MIT"
+}
