@@ -9,13 +9,15 @@
  *   - GET  /workflows-meta  → list workflows + their metadata
  *   - GET  /docs/json       → OpenAPI schema per workflow
  *   - POST /workflow/:name  → render a workflow (body: {input: {...}})
+ *   - GET  /progress/:id    → SSE stream of progress events
+ *   - GET  /image/:filename → lazy-streams the PNG from ComfyUI /view
  *
  * Browser counterpart calls these via:
  *   fetch('/api/plugins/st-ext-server-loader/ext/st-comfyui-workflows/...', ...)
  *
- * Backend URLs are configured via env vars (see below). Defaults point to
- * the example placeholder — production deployments set them to the internal
- * (VPN / Tailscale / Docker-network) URLs.
+ * Backend-URL is configured via env var COMFYUI_BASE_URL. Default points to
+ * the example placeholder — production deployments set it to the internal
+ * (VPN / Tailscale / Docker-network) URL of their comfyui-api instance.
  *
  * Why this exists:
  *   - Centralised logging in the SillyTavern container (visible via
@@ -27,6 +29,7 @@
  *     embedded in the page.
  */
 
+const crypto = require('crypto');
 const LOG_PREFIX = '[st-comfyui-workflows]';
 // Two upstream URLs because the comfyui-api FastAPI wrapper and the ComfyUI
 // custom-node `api-proxy` live on different ports:
@@ -97,16 +100,180 @@ async function init(router) {
     // OpenAPI-Schema → comfyui-api wrapper.
     router.get('/docs/json', (req, res) => proxyJson(req, res, apiUrl(), '/docs/json'));
 
-    // Render → comfyui-api wrapper.
+    // Render → comfyui-api wrapper. Wrapper is forked
+    // (rostchri/comfyui-api with KEEP_OUTPUT_FILES=true + RETURN_BASE64=false)
+    // so the response has no base64 anymore — just filenames + metadata.
+    //
+    // We replace the upstream response's `filenames`-only output with an
+    // `image` field pointing at this plugin's /image/<filename> route. That
+    // route lazy-streams from ComfyUI's /view endpoint when the browser
+    // actually paints the chat message. Net result: ~14 KB response to the
+    // browser, no base64 round-trip anywhere.
     //
     // Logging analog zum NanoGPT-Pattern in SillyTavern's stable-diffusion
     // extension: input ausfuehrlich damit Prompt + alle Parameter im
     // container-log nachvollziehbar sind.
-    router.post('/workflow/:name', (req, res) => {
+    router.post('/workflow/:name', async (req, res) => {
         const name = req.params.name;
+        // Idempotency: take client-supplied id (header or body), else mint a
+        // UUID. Forked comfyui-api treats request.body.id and the
+        // Idempotency-Key header as dedup keys — same key, same render.
+        const body = req.body || {};
+        const idemKey =
+            req.get('idempotency-key') ||
+            req.get('x-idempotency-key') ||
+            body.id ||
+            crypto.randomUUID();
+        body.id = idemKey;
         // eslint-disable-next-line no-console
-        console.debug(`${LOG_PREFIX} render request workflow=${name} input=`, req.body?.input);
-        return proxyJson(req, res, apiUrl(), `/workflow/${encodeURIComponent(name)}`);
+        console.debug(`${LOG_PREFIX} render request workflow=${name} id=${idemKey} input=`, body.input);
+
+        const t0 = Date.now();
+        const url = `${apiUrl()}/workflow/${encodeURIComponent(name)}`;
+        let upstreamResp;
+        try {
+            upstreamResp = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Idempotency-Key': idemKey,
+                },
+                body: JSON.stringify(body),
+            });
+        } catch (e) {
+            console.error(`${LOG_PREFIX} POST /workflow/${name} → fetch threw:`, e);
+            return res.status(502).json({ error: `upstream fetch failed: ${e.message}` });
+        }
+        const ms = Date.now() - t0;
+        const text = await upstreamResp.text();
+        if (!upstreamResp.ok) {
+            console.warn(`${LOG_PREFIX} POST /workflow/${name} → HTTP ${upstreamResp.status} (${ms}ms): ${text.slice(0, 300)}`);
+            res.status(upstreamResp.status);
+            res.set('Content-Type', upstreamResp.headers.get('content-type') || 'application/json');
+            return res.send(text);
+        }
+
+        let data;
+        try {
+            data = JSON.parse(text);
+        } catch (e) {
+            console.error(`${LOG_PREFIX} POST /workflow/${name} → upstream returned non-JSON`);
+            return res.status(502).json({ error: 'upstream returned non-JSON' });
+        }
+
+        const filename = data.filenames?.[0];
+        if (!filename) {
+            console.log(`${LOG_PREFIX} POST /workflow/${name} → HTTP 200 (${ms}ms, no filenames?) — forwarding response as-is`);
+            return res.json(data);
+        }
+
+        // Build same-origin URL pointing at our /image/<filename> proxy route.
+        // Browser fetches lazy through it; route forwards to ComfyUI /view.
+        const imageUrl = `/api/plugins/st-ext-server-loader/ext/st-comfyui-workflows/image/${encodeURIComponent(filename)}`;
+        const slim = {
+            image: imageUrl,
+            id: data.id,
+            filenames: data.filenames,
+            stats: data.stats,
+            input: data.input,
+            prompt: data.prompt,
+        };
+        // Optional: also strip `images` if forked wrapper still sent any
+        // (shouldn't, but defensive).
+        if (Array.isArray(data.images) && data.images.length > 0) {
+            console.warn(`${LOG_PREFIX} upstream still returned ${data.images.length} base64 image(s) — forked wrapper not active? Dropping them.`);
+        }
+
+        console.log(`${LOG_PREFIX} POST /workflow/${name} → HTTP 200 (${ms}ms) → image url=${imageUrl}`);
+        return res.json(slim);
+    });
+
+    // Progress-Stream-Proxy: tunnels comfyui-api's SSE endpoint through the
+    // ST-internal route so the browser can keep same-origin policy and pick
+    // up CSRF/cookies for free. The browser opens
+    //   new EventSource('/api/plugins/.../progress/<id>')
+    // in parallel with POST /workflow and reads 'progress', 'executing',
+    // 'executed', 'execution_success' events. The upstream closes on the
+    // terminal event; we just pipe it through.
+    router.get('/progress/:id', async (req, res) => {
+        const id = req.params.id;
+        if (!id || id.length > 128 || /[^a-zA-Z0-9_.:-]/.test(id)) {
+            return res.status(400).json({ error: 'invalid id' });
+        }
+        const upstream = `${apiUrl()}/progress/${encodeURIComponent(id)}`;
+        console.log(`${LOG_PREFIX} GET /progress/${id} → opening upstream SSE`);
+
+        // Server-side fetch with streaming body. Node's undici/fetch returns
+        // a ReadableStream we can pipe through.
+        let r;
+        try {
+            r = await fetch(upstream, {
+                method: 'GET',
+                headers: { Accept: 'text/event-stream' },
+            });
+        } catch (e) {
+            console.error(`${LOG_PREFIX} GET /progress/${id} → upstream threw:`, e);
+            return res.status(502).json({ error: `upstream fetch failed: ${e.message}` });
+        }
+        if (!r.ok || !r.body) {
+            console.warn(`${LOG_PREFIX} GET /progress/${id} → upstream HTTP ${r.status}`);
+            return res.status(r.status || 502).send(await r.text().catch(() => ''));
+        }
+
+        res.set('Content-Type', 'text/event-stream; charset=utf-8');
+        res.set('Cache-Control', 'no-cache, no-transform');
+        res.set('Connection', 'keep-alive');
+        res.set('X-Accel-Buffering', 'no');
+        res.flushHeaders?.();
+
+        // Pipe upstream body → response. Node fetch body is a web ReadableStream;
+        // convert to Node stream via Readable.fromWeb (Node 18+).
+        const { Readable } = require('stream');
+        const nodeStream = Readable.fromWeb(r.body);
+
+        const onClose = () => {
+            try { nodeStream.destroy(); } catch (e) { /* ignore */ }
+        };
+        req.on('close', onClose);
+        nodeStream.on('error', (e) => {
+            console.warn(`${LOG_PREFIX} GET /progress/${id} → stream error:`, e.message);
+            try { res.end(); } catch (_) { /* ignore */ }
+        });
+        nodeStream.pipe(res);
+    });
+
+    // Image-streaming proxy: lazy-fetches the PNG from ComfyUI's /view
+    // endpoint at render-time. Browser puts a same-origin URL in the chat
+    // (no base64 in chat.json, no upload round-trip), and the actual file
+    // download only happens when the message is rendered.
+    //
+    // nodeUrl() looks like 'http://comfyui-host:8188/api-proxy' — strip the
+    // /api-proxy suffix to get the ComfyUI root, then append /view?filename=.
+    router.get('/image/:filename', async (req, res) => {
+        const fname = req.params.filename;
+        if (!fname || fname.includes('..') || fname.includes('/')) {
+            return res.status(400).json({ error: 'invalid filename' });
+        }
+        // Strip the api-proxy suffix that the custom-node adds; we need the
+        // raw ComfyUI host for /view.
+        const comfyRoot = nodeUrl().replace(/\/api-proxy$/, '');
+        const viewUrl = `${comfyRoot}/view?filename=${encodeURIComponent(fname)}&type=output&subfolder=`;
+        try {
+            const r = await fetch(viewUrl);
+            if (!r.ok) {
+                const errText = await r.text().catch(() => '');
+                console.warn(`${LOG_PREFIX} GET /image/${fname} → upstream HTTP ${r.status}: ${errText.slice(0, 200)}`);
+                return res.status(r.status).send(errText);
+            }
+            res.set('Content-Type', r.headers.get('content-type') || 'image/png');
+            // Cache aggressively — same filename = same content.
+            res.set('Cache-Control', 'public, max-age=31536000, immutable');
+            const buf = Buffer.from(await r.arrayBuffer());
+            return res.send(buf);
+        } catch (e) {
+            console.error(`${LOG_PREFIX} GET /image/${fname} → fetch threw:`, e);
+            return res.status(502).json({ error: `upstream fetch failed: ${e.message}` });
+        }
     });
 }
 
