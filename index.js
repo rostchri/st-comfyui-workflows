@@ -1,9 +1,11 @@
 // st-comfyui-workflows — SillyTavern Third-Party Extension
 //
-// Talks to a self-hosted ComfyUI backend running SaladTechnologies/comfyui-api.
+// Talks to a self-hosted ComfyUI backend running rostchri/comfyui-api
+// (forked SaladTechnologies/comfyui-api with queue, idempotency, SSE
+// progress, /image and /workflows-meta endpoints).
 // Workflows + their parameter schemas are discovered dynamically via:
-//   GET /api-proxy/workflows-meta
-// + GET /api-proxy/docs/json
+//   GET /workflows-meta   (sidecar *.meta.json aggregator)
+// + GET /docs/json        (OpenAPI schema)
 // The form for each workflow is generated from the OpenAPI schema.
 //
 // Zero patches to SillyTavern core files — registers its own settings-drawer
