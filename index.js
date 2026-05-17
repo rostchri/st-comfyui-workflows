@@ -9,10 +9,9 @@
 // Zero patches to SillyTavern core files — registers its own settings-drawer
 // section and slash-command `/sd-cw`.
 //
-// v0.3.0+: all HTTP traffic to ComfyUI is routed through the SillyTavern
-// backend via the st-ext-server-loader plugin. The browser only ever
-// fetches same-origin URLs (/api/plugins/st-ext-server-loader/ext/...),
-// no CORS / cookie-credentials gymnastics needed.
+// Browser ↔ ComfyUI: direct fetch(). Default Base-URL is configurable in
+// settings. fetch() uses `credentials: 'include'` so cookie-based SSO
+// (Authelia, oauth2-proxy, etc.) cross-subdomain works.
 
 // ES Module imports — ST extensions are loaded as ES Modules. We import the
 // real symbols instead of destructuring from `SillyTavern.*` (which varies
@@ -84,11 +83,73 @@ async function loadOpenAPI() {
     return fetchJSON('/docs/json');
 }
 
-async function generate(workflow, input) {
-    return fetchJSON(`/workflow/${encodeURIComponent(workflow)}`, {
-        method: 'POST',
-        body: JSON.stringify({ input }),
+// Generates a UUID. Prefer the browser-native API (Chrome 92+, FF 95+); fall
+// back to a Math.random-based v4 for ancient browsers — we only need
+// uniqueness for idempotency dedup, not cryptographic strength.
+function mintRequestId() {
+    if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+        const r = (Math.random() * 16) | 0;
+        const v = c === 'x' ? r : (r & 0x3) | 0x8;
+        return v.toString(16);
     });
+}
+
+/**
+ * Submit a workflow and (optionally) stream progress events back through the
+ * provided callback. Returns the final JSON payload.
+ *
+ *   onProgress(kind, data)
+ *     kind = 'queue' | 'execution_start' | 'executing' | 'progress' |
+ *            'executed' | 'execution_success' | 'execution_error' | 'done'
+ *
+ * The Idempotency-Key + body.id make retries safe: comfyui-api dedups against
+ * the same key; ComfyUI itself never sees two submissions for one user click.
+ */
+async function generate(workflow, input, onProgress) {
+    const reqId = mintRequestId();
+
+    let es = null;
+    if (typeof EventSource !== 'undefined' && typeof onProgress === 'function') {
+        try {
+            es = new EventSource(`${BACKEND_BASE}/progress/${encodeURIComponent(reqId)}`);
+            const kinds = [
+                'queue',
+                'prompt_meta',
+                'execution_start',
+                'executing',
+                'progress',
+                'executed',
+                'execution_success',
+                'execution_error',
+                'done',
+            ];
+            for (const kind of kinds) {
+                es.addEventListener(kind, (e) => {
+                    let data = {};
+                    try { data = JSON.parse(e.data); } catch (_) { /* ignore */ }
+                    try { onProgress(kind, data); } catch (cbErr) {
+                        console.warn(`[${MODULE_NAME}] progress callback threw:`, cbErr);
+                    }
+                });
+            }
+            // EventSource auto-reconnects on transient drops; silence the noise.
+            es.addEventListener('error', () => { /* swallow */ });
+        } catch (e) {
+            console.warn(`[${MODULE_NAME}] EventSource setup failed (continuing without progress):`, e);
+            es = null;
+        }
+    }
+
+    try {
+        return await fetchJSON(`/workflow/${encodeURIComponent(workflow)}`, {
+            method: 'POST',
+            headers: { 'Idempotency-Key': reqId },
+            body: JSON.stringify({ id: reqId, input }),
+        });
+    } finally {
+        if (es) { try { es.close(); } catch (_) { /* ignore */ } }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -531,22 +592,71 @@ async function generateClicked() {
 
         statusEl.textContent = `POST /workflow/${workflow} (Render kann 5-180s dauern) ...`;
         const t0 = performance.now();
-        const data = await generate(workflow, input);
+        // Track step-rate so we can show an ETA. Reset on each kind change.
+        let lastProgressTs = 0;
+        let lastProgressVal = 0;
+        // node-id → display title (gefuellt vom prompt_meta SSE-Event)
+        let nodeTitles = {};
+        const niceNode = (id) => {
+            if (!id) return '?';
+            const t = nodeTitles[id];
+            return t ? `${t} (#${id})` : `Node ${id}`;
+        };
+        const data = await generate(workflow, input, (kind, ev) => {
+            if (kind === 'prompt_meta') {
+                if (ev && ev.nodes && typeof ev.nodes === 'object') nodeTitles = ev.nodes;
+            } else if (kind === 'queue') {
+                const q = ev.pending ?? 0;
+                statusEl.textContent = q > 0
+                    ? `Warteschlange: ${q} Auftrag/Auftraege vor dir ...`
+                    : 'Warteschlange leer — start gleich ...';
+            } else if (kind === 'execution_start') {
+                statusEl.textContent = 'Render gestartet ...';
+                lastProgressTs = performance.now();
+                lastProgressVal = 0;
+            } else if (kind === 'executing') {
+                statusEl.textContent = `▶ ${niceNode(ev.node)}`;
+            } else if (kind === 'progress') {
+                const v = ev.value ?? 0;
+                const m = ev.max ?? 0;
+                const pct = m > 0 ? Math.round((v / m) * 100) : 0;
+                let eta = '';
+                const now = performance.now();
+                if (lastProgressTs && v > lastProgressVal && m > v) {
+                    const dt = (now - lastProgressTs) / 1000;
+                    const dv = v - lastProgressVal;
+                    if (dv > 0 && dt > 0) {
+                        const perStep = dt / dv;
+                        const remaining = Math.round(perStep * (m - v));
+                        eta = ` · ETA ${remaining}s (${perStep.toFixed(1)}s/it)`;
+                    }
+                }
+                lastProgressTs = now;
+                lastProgressVal = v;
+                const nodePart = ev.node ? ` · ${niceNode(ev.node)}` : '';
+                statusEl.textContent = `Step ${v}/${m} (${pct}%)${nodePart}${eta}`;
+            } else if (kind === 'execution_success') {
+                statusEl.textContent = 'Render fertig — lade Bild ...';
+            } else if (kind === 'execution_error') {
+                statusEl.textContent = `Render-Fehler: ${JSON.stringify(ev.error)?.slice(0, 200)}`;
+            }
+        });
         const t1 = performance.now();
-        if (data.images && data.images.length) {
+        // Server-Plugin v0.4.0+ liefert {image: "user/images/..."} — die
+        // base64-Konversion + saveBase64AsFile passiert bereits backend-side.
+        // Fallback: aeltere Plugin-Version → {images: [base64]}, dann selbst saven.
+        let imgSrc = data.image;
+        if (!imgSrc && data.images?.length) {
             const meta = _workflowsMeta[workflow] || {};
             const ext = meta.output_format === 'webp' ? 'webp' : 'png';
-            // Server-side save → URL statt fat data: URI. Analog zum NanoGPT-
-            // Pattern in SillyTavern's stable-diffusion extension. Subfolder
-            // ist fix "comfyui-workflows" — die Settings-UI generiert nicht
-            // im Character-Kontext.
-            let imgSrc;
             try {
                 imgSrc = await saveBase64AsFile(data.images[0], 'comfyui-workflows', `${workflow}_${Date.now()}`, ext);
             } catch (saveErr) {
                 console.warn(`[${MODULE_NAME}] saveBase64AsFile failed, falling back to data-URI:`, saveErr);
                 imgSrc = `data:image/${ext};base64,${data.images[0]}`;
             }
+        }
+        if (imgSrc) {
             const img = new Image();
             img.className = 'comfyui-wf-thumb';
             img.src = imgSrc;
