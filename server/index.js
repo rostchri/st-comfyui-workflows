@@ -5,17 +5,17 @@
  * https://github.com/rostchri/st-ext-server-loader) which mounts this
  * router at /api/plugins/st-ext-server-loader/ext/st-comfyui-workflows/...
  *
- * Routes proxied to ComfyUI-API (SaladTechnologies/comfyui-api):
+ * Routes proxied to rostchri/comfyui-api (single base URL):
  *   - GET  /workflows-meta  → list workflows + their metadata
  *   - GET  /docs/json       → OpenAPI schema per workflow
  *   - POST /workflow/:name  → render a workflow (body: {input: {...}})
  *   - GET  /progress/:id    → SSE stream of progress events
- *   - GET  /image/:filename → lazy-streams the PNG from ComfyUI /view
+ *   - GET  /image/:filename → fetch the rendered PNG/WebP/MP4
  *
  * Browser counterpart calls these via:
  *   fetch('/api/plugins/st-ext-server-loader/ext/st-comfyui-workflows/...', ...)
  *
- * Backend-URL is configured via env var COMFYUI_BASE_URL. Default points to
+ * Backend-URL is configured via env var COMFYUI_API_URL. Default points to
  * the example placeholder — production deployments set it to the internal
  * (VPN / Tailscale / Docker-network) URL of their comfyui-api instance.
  *
@@ -31,29 +31,27 @@
 
 const crypto = require('crypto');
 const LOG_PREFIX = '[st-comfyui-workflows]';
-// Two upstream URLs because the comfyui-api FastAPI wrapper and the ComfyUI
-// custom-node `api-proxy` live on different ports:
+// Single base URL — rostchri/comfyui-api fork serves everything we need
+// on the wrapper port (default :3000):
 //
-//   COMFYUI_API_URL  → comfyui-api wrapper (SaladTechnologies). Serves
-//                       /workflow/<name>, /docs/json, /health.
-//   COMFYUI_NODE_URL → ComfyUI itself, with the comfyui-api-proxy custom-node
-//                       mounted at /api-proxy/. Serves /workflows-meta.
+//   POST /workflow/<name>     — render submitted prompt
+//   GET  /progress/<id>       — Server-Sent-Events progress stream
+//   GET  /image/<filename>    — fetch the rendered PNG/WebP/MP4
+//   GET  /workflows-meta      — aggregated *.meta.json sidecar files
+//   GET  /docs/json           — OpenAPI schema (per workflow)
 //
-// In a Traefik-fronted setup these often look like one URL with a path-prefix
-// router doing the split. For internal Tailscale we keep them explicit.
+// Legacy `COMFYUI_NODE_URL` (port 8188 / api-proxy) is no longer used —
+// we kept the env var name as a fallback only in case someone still
+// has it set to the same host:port as the wrapper.
 const DEFAULT_API_URL = 'http://comfyui.example.local:3000';
-const DEFAULT_NODE_URL = 'http://comfyui.example.local:8188/api-proxy';
 
 function apiUrl() {
     return (process.env.COMFYUI_API_URL || process.env.COMFYUI_BASE_URL || DEFAULT_API_URL).replace(/\/$/, '');
 }
-function nodeUrl() {
-    return (process.env.COMFYUI_NODE_URL || DEFAULT_NODE_URL).replace(/\/$/, '');
-}
 
 /**
  * Generic JSON proxy. Forwards method + body, returns the parsed JSON
- * (or the upstream error verbatim). `base` is one of apiUrl()/nodeUrl().
+ * (or the upstream error verbatim).
  */
 async function proxyJson(req, res, base, path) {
     const url = `${base}${path}`;
@@ -86,16 +84,17 @@ async function proxyJson(req, res, base, path) {
 }
 
 async function init(router) {
-    console.log(`${LOG_PREFIX} server-side proxy ready (api=${apiUrl()} node=${nodeUrl()})`);
+    console.log(`${LOG_PREFIX} server-side proxy ready (api=${apiUrl()})`);
 
     // Liveness / config-visibility endpoint
     router.get('/health', (_req, res) => {
-        res.json({ ok: true, api: apiUrl(), node: nodeUrl() });
+        res.json({ ok: true, api: apiUrl() });
     });
 
-    // Workflow-Discovery → ComfyUI custom-node (lebt am ComfyUI-Port, nicht
-    // am comfyui-api Port). Pfad ist `/workflows-meta` unter nodeUrl().
-    router.get('/workflows-meta', (req, res) => proxyJson(req, res, nodeUrl(), '/workflows-meta'));
+    // Workflow-Discovery → comfyui-api wrapper (Fork-Feature: /workflows-meta
+    // aggregiert die *.meta.json sidecar files, same shape wie der alte
+    // /api-proxy/workflows-meta auf Port 8188).
+    router.get('/workflows-meta', (req, res) => proxyJson(req, res, apiUrl(), '/workflows-meta'));
 
     // OpenAPI-Schema → comfyui-api wrapper.
     router.get('/docs/json', (req, res) => proxyJson(req, res, apiUrl(), '/docs/json'));
@@ -168,7 +167,7 @@ async function init(router) {
         }
 
         // Build same-origin URL pointing at our /image/<filename> proxy route.
-        // Browser fetches lazy through it; route forwards to ComfyUI /view.
+        // Browser fetches lazy through it; route forwards to wrapper /image.
         const imageUrl = `/api/plugins/st-ext-server-loader/ext/st-comfyui-workflows/image/${encodeURIComponent(filename)}`;
         const slim = {
             image: imageUrl,
@@ -242,24 +241,19 @@ async function init(router) {
         nodeStream.pipe(res);
     });
 
-    // Image-streaming proxy: lazy-fetches the PNG from ComfyUI's /view
-    // endpoint at render-time. Browser puts a same-origin URL in the chat
-    // (no base64 in chat.json, no upload round-trip), and the actual file
-    // download only happens when the message is rendered.
-    //
-    // nodeUrl() looks like 'http://comfyui-host:8188/api-proxy' — strip the
-    // /api-proxy suffix to get the ComfyUI root, then append /view?filename=.
+    // Image-streaming proxy: streams the rendered file from the wrapper's
+    // GET /image/<filename> endpoint (Fork-Feature). Browser puts a
+    // same-origin URL in the chat (no base64 in chat.json, no upload
+    // round-trip), and the actual file download only happens when the
+    // message is rendered.
     router.get('/image/:filename', async (req, res) => {
         const fname = req.params.filename;
         if (!fname || fname.includes('..') || fname.includes('/')) {
             return res.status(400).json({ error: 'invalid filename' });
         }
-        // Strip the api-proxy suffix that the custom-node adds; we need the
-        // raw ComfyUI host for /view.
-        const comfyRoot = nodeUrl().replace(/\/api-proxy$/, '');
-        const viewUrl = `${comfyRoot}/view?filename=${encodeURIComponent(fname)}&type=output&subfolder=`;
+        const upstreamUrl = `${apiUrl()}/image/${encodeURIComponent(fname)}`;
         try {
-            const r = await fetch(viewUrl);
+            const r = await fetch(upstreamUrl);
             if (!r.ok) {
                 const errText = await r.text().catch(() => '');
                 console.warn(`${LOG_PREFIX} GET /image/${fname} → upstream HTTP ${r.status}: ${errText.slice(0, 200)}`);
